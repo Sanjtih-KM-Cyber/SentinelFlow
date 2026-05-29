@@ -1,186 +1,243 @@
 """
-SentinelFlow — Central Orchestrator
-Coordinates the full pipeline: Discovery → Audit → DAST → Alert → Report
+SentinelFlow Central Orchestrator
+Coordinates the full EASM pipeline: discovery → audit → DAST → reporting → alerting.
 """
 
 import asyncio
-import logging
-import sys
-from pathlib import Path
-from typing import Optional
+import json
+from datetime import datetime
+from typing import List, Dict, Any, Optional
 
-# Ensure project root is on sys.path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from core.config import Config
+from core.database import Database
+from core.logger import get_logger
 
-from config.settings import (
-    SCAN_TIMEOUT_SEC,
-    ALERT_ON_SEVERITIES,
-)
-from core.database import (
-    init_db,
-    create_scan,
-    finish_scan,
-    get_assets,
-    get_findings,
-    mark_alerted,
-    summary_stats,
-)
-from phases.discovery.subdomain_enum   import run_subdomain_enum
-from phases.discovery.service_probe    import run_service_probe
-from phases.audit.endpoint_fuzz        import run_endpoint_fuzz
-from phases.audit.js_sast              import run_js_sast
-from phases.audit.cloud_exposure       import run_cloud_exposure
-from phases.dast.input_validation      import run_input_validation
-from phases.dast.nuclei_scan           import run_nuclei_scan
-from phases.alerting.telegram_bot      import send_finding_alert, send_scan_summary
-from phases.reporting.report_generator import generate_report
-
-log = logging.getLogger("orchestrator")
+logger = get_logger(__name__)
 
 
-async def run_pipeline(seed: str, notify: bool = True) -> int:
+class SentinelOrchestrator:
     """
-    Execute the full SentinelFlow pipeline for a given seed domain.
-    Returns the scan_id.
+    The heart of SentinelFlow.
+    Manages phase execution, state persistence, and result aggregation.
     """
-    log.info("═══════════════════════════════════════════")
-    log.info("  SentinelFlow — starting scan for: %s", seed)
-    log.info("═══════════════════════════════════════════")
 
-    scan_id = create_scan(seed)
-    log.info("Scan #%d created", scan_id)
+    def __init__(self, config: Config):
+        self.config = config
+        self.db = Database(config.db_path)
+        self.notifier = None
+        self._scan_id: Optional[int] = None
+        self._domain_id: Optional[int] = None
 
-    try:
-        # ── Phase I: Asset Discovery ──────────────────────────────────────────
-        log.info("[Phase I] Starting digital asset inventory...")
-        await run_subdomain_enum(scan_id, seed)
-        await run_service_probe(scan_id)
+    async def initialize(self):
+        """Set up database and notification channels."""
+        await self.db.connect()
+        logger.info("Database initialized")
 
-        assets = get_assets(scan_id)
-        alive  = get_assets(scan_id, http_alive_only=True)
-        log.info(
-            "[Phase I] Complete — %d subdomains found, %d HTTP-alive",
-            len(assets), len(alive),
-        )
+        if self.config.has_telegram:
+            from phases.notifier import TelegramNotifier
+            self.notifier = TelegramNotifier(self.config)
+            await self.notifier.send_message("🛡️ *SentinelFlow* initialized and ready.")
+            logger.info("Telegram notifier connected")
 
-        if not alive:
-            log.warning("No live HTTP services found. Skipping audit/DAST phases.")
-            finish_scan(scan_id, "done")
-            return scan_id
+    async def shutdown(self):
+        """Graceful teardown."""
+        await self.db.close()
+        logger.info("Orchestrator shutdown complete")
 
-        # ── Phase II: Config & Secret Leakage Audit ───────────────────────────
-        log.info("[Phase II] Starting configuration & secret leakage audit...")
-        audit_tasks = [
-            run_endpoint_fuzz(scan_id, alive),
-            run_js_sast(scan_id, alive),
-            run_cloud_exposure(scan_id, seed),
-        ]
-        await asyncio.gather(*audit_tasks)
-        log.info("[Phase II] Audit complete")
+    # ─── Pipeline ─────────────────────────────────────────────────────────
 
-        # ── Phase III: DAST ───────────────────────────────────────────────────
-        log.info("[Phase III] Starting dynamic security validation...")
-        dast_tasks = [
-            run_input_validation(scan_id, alive),
-            run_nuclei_scan(scan_id, alive),
-        ]
-        await asyncio.gather(*dast_tasks)
-        log.info("[Phase III] DAST complete")
+    async def run_pipeline(self, domain: str, phases: List[str]) -> Dict[str, Any]:
+        """
+        Execute the full security pipeline for a given domain.
 
-        # ── Phase IV: Alert ───────────────────────────────────────────────────
-        if notify:
-            log.info("[Phase IV] Dispatching alerts...")
-            await _dispatch_alerts(scan_id)
+        Args:
+            domain: Root domain to scan.
+            phases: List of phase names to run.
 
-        # ── Reporting ─────────────────────────────────────────────────────────
-        log.info("[Reporting] Generating compliance report...")
-        report_path = await generate_report(scan_id, seed)
-        log.info("[Reporting] Report saved to %s", report_path)
+        Returns:
+            Aggregated results dictionary.
+        """
+        start_time = datetime.now()
+        logger.info(f"Pipeline started for {domain} | Phases: {phases}")
 
-        finish_scan(scan_id, "done")
+        # Register domain and scan session
+        self._domain_id = await self.db.upsert_domain(domain)
+        self._scan_id = await self.db.create_scan(domain, phases)
+        await self.db.update_domain_scan_time(self._domain_id)
 
-        stats = summary_stats(scan_id)
-        log.info(
-            "═══ Scan #%d COMPLETE — Assets: %d | C:%d H:%d M:%d L:%d ═══",
-            scan_id,
-            stats["asset_count"],
-            stats["critical"],
-            stats["high"],
-            stats["medium"],
-            stats["low"],
-        )
-
-        if notify:
-            await send_scan_summary(scan_id, seed, stats)
-
-    except asyncio.CancelledError:
-        log.warning("Scan #%d was cancelled", scan_id)
-        finish_scan(scan_id, "error")
-        raise
-    except Exception as exc:
-        log.exception("Scan #%d failed: %s", scan_id, exc)
-        finish_scan(scan_id, "error")
-        raise
-
-    return scan_id
-
-
-async def _dispatch_alerts(scan_id: int) -> None:
-    """Send Telegram alerts for unalerted findings that meet severity threshold."""
-    alerted_ids = []
-    for severity in ALERT_ON_SEVERITIES:
-        findings = get_findings(scan_id, severity=severity, unalerted_only=True)
-        for finding in findings:
-            try:
-                await send_finding_alert(finding)
-                alerted_ids.append(finding["id"])
-            except Exception as exc:
-                log.warning("Alert failed for finding %d: %s", finding["id"], exc)
-
-    mark_alerted(alerted_ids)
-    log.info("[Phase IV] Alerted on %d findings", len(alerted_ids))
-
-
-# ── CLI entry point ───────────────────────────────────────────────────────────
-
-def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="SentinelFlow — EASM & Continuous Security Monitor"
-    )
-    parser.add_argument("seed", help="Root domain to scan (e.g. example.com)")
-    parser.add_argument(
-        "--no-notify", action="store_true", help="Disable Telegram notifications"
-    )
-    parser.add_argument(
-        "--log-level", default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-    )
-    args = parser.parse_args()
-
-    logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    init_db()
-
-    try:
-        asyncio.run(
-            asyncio.wait_for(
-                run_pipeline(args.seed, notify=not args.no_notify),
-                timeout=SCAN_TIMEOUT_SEC,
+        if self.notifier:
+            await self.notifier.send_message(
+                f"🔍 *New Scan Started*\n"
+                f"Domain: `{domain}`\n"
+                f"Phases: {', '.join(phases)}\n"
+                f"Scan ID: `{self._scan_id}`"
             )
+
+        results: Dict[str, Any] = {
+            "domain": domain,
+            "scan_id": self._scan_id,
+            "phases_run": phases,
+            "started_at": start_time.isoformat(),
+            "subdomains": [],
+            "services": [],
+            "findings": [],
+        }
+
+        phase_map = {
+            "discovery": self._run_discovery,
+            "audit": self._run_audit,
+            "dast": self._run_dast,
+            "report": self._run_reporting,
+        }
+
+        scan_status = "complete"
+
+        for phase_name in phases:
+            handler = phase_map.get(phase_name)
+            if not handler:
+                logger.warning(f"Unknown phase: {phase_name}, skipping")
+                continue
+
+            logger.info(f"▶ Starting phase: {phase_name.upper()}")
+            try:
+                phase_result = await handler(domain, results)
+                results[f"{phase_name}_result"] = phase_result
+                logger.info(f"✔ Phase complete: {phase_name.upper()}")
+            except Exception as exc:
+                logger.error(f"Phase {phase_name} failed: {exc}", exc_info=True)
+                results[f"{phase_name}_error"] = str(exc)
+                scan_status = "partial"
+
+        # Finalize scan
+        summary = await self.db.get_findings_summary(self._scan_id)
+        elapsed = (datetime.now() - start_time).total_seconds()
+
+        await self.db.complete_scan(self._scan_id, status=scan_status, stats=summary)
+
+        results["finished_at"] = datetime.now().isoformat()
+        results["elapsed_seconds"] = elapsed
+        results["findings_summary"] = summary
+
+        self._log_summary(domain, summary, elapsed)
+
+        if self.notifier:
+            await self.notifier.send_scan_complete(domain, summary, elapsed)
+
+        return results
+
+    # ─── Phase Handlers ───────────────────────────────────────────────────
+
+    async def _run_discovery(self, domain: str, results: Dict) -> Dict:
+        """Phase I: Asset discovery — subdomains, services, ports."""
+        from phases.discovery import AssetDiscovery
+
+        discovery = AssetDiscovery(self.config, self.db)
+        phase_result = await discovery.run(
+            domain=domain,
+            domain_id=self._domain_id,
+            scan_id=self._scan_id,
         )
-    except asyncio.TimeoutError:
-        log.error("Scan timed out after %d seconds", SCAN_TIMEOUT_SEC)
-        sys.exit(1)
-    except KeyboardInterrupt:
-        log.info("Interrupted by user")
-        sys.exit(0)
 
+        results["subdomains"] = phase_result.get("subdomains", [])
+        results["services"] = phase_result.get("services", [])
 
-if __name__ == "__main__":
-    main()
+        sub_count = len(results["subdomains"])
+        svc_count = len(results["services"])
+        logger.info(f"Discovery: {sub_count} subdomains, {svc_count} live services")
+
+        if self.notifier:
+            await self.notifier.send_message(
+                f"📡 *Discovery Complete*\n"
+                f"Subdomains: `{sub_count}`\n"
+                f"Live services: `{svc_count}`"
+            )
+
+        return phase_result
+
+    async def _run_audit(self, domain: str, results: Dict) -> Dict:
+        """Phase II: Configuration & secret leakage auditing."""
+        from phases.auditor import ConfigAuditor
+
+        auditor = ConfigAuditor(self.config, self.db)
+        services = results.get("services") or await self.db.get_services(self._domain_id)
+
+        phase_result = await auditor.run(
+            domain=domain,
+            domain_id=self._domain_id,
+            scan_id=self._scan_id,
+            services=services,
+        )
+
+        # Alert on critical/high findings immediately
+        await self._alert_new_findings()
+        return phase_result
+
+    async def _run_dast(self, domain: str, results: Dict) -> Dict:
+        """Phase III: Dynamic Application Security Testing — scans ALL services."""
+        from phases.dast import DASTScanner
+
+        dast = DASTScanner(self.config, self.db)
+        # Get ALL services from DB, not just current scan
+        services = results.get("services") or await self.db.get_services(self._domain_id)
+
+        # Also add any subdomains that have live services from DB
+        all_db_services = await self.db.get_services(self._domain_id)
+        if all_db_services:
+            existing_urls = {s.get("url") for s in services}
+            for svc in all_db_services:
+                if svc.get("url") not in existing_urls:
+                    services.append(svc)
+                    existing_urls.add(svc.get("url"))
+
+        logger.info(f"[DAST] Scanning {len(services)} total services")
+
+        phase_result = await dast.run(
+            domain=domain,
+            domain_id=self._domain_id,
+            scan_id=self._scan_id,
+            services=services,
+        )
+
+        await self._alert_new_findings()
+        return phase_result
+
+    async def _run_reporting(self, domain: str, results: Dict) -> Dict:
+        """Phase V: Generate compliance report."""
+        from reports.generator import ReportGenerator
+
+        generator = ReportGenerator(self.config, self.db)
+        report_result = await generator.generate(
+            domain=domain,
+            scan_id=self._scan_id,
+            results=results,
+        )
+        return report_result
+
+    # ─── Alert Dispatch ───────────────────────────────────────────────────
+
+    async def _alert_new_findings(self):
+        """Send Telegram alerts for unalerted critical/high findings."""
+        if not self.notifier:
+            return
+
+        unalerted = await self.db.get_findings(scan_id=self._scan_id, alerted=False)
+        alert_severities = set(self.config.alert_on_severity)
+
+        for finding in unalerted:
+            if finding["severity"] in alert_severities:
+                await self.notifier.send_finding_alert(finding)
+                await self.db.mark_finding_alerted(finding["id"])
+
+    # ─── Utilities ────────────────────────────────────────────────────────
+
+    def _log_summary(self, domain: str, summary: Dict, elapsed: float):
+        """Print final scan summary table."""
+        logger.info("=" * 60)
+        logger.info(f"  SCAN COMPLETE: {domain}")
+        logger.info(f"  Duration: {elapsed:.1f}s")
+        logger.info("-" * 60)
+        for sev in ["critical", "high", "medium", "low", "info"]:
+            count = summary.get(sev, 0)
+            if count:
+                logger.info(f"  {sev.upper():10s}: {count}")
+        logger.info("=" * 60)

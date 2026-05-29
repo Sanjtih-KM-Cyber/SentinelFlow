@@ -1,237 +1,285 @@
-# 🛡 SentinelFlow
+# 🛡️ SentinelFlow — Automated EASM Pipeline
 
-**Automated External Attack Surface Management (EASM) & Continuous Security Monitoring Pipeline**
-
-> Gain full visibility into your digital footprint, identify misconfigurations in real time, and validate security controls against OWASP Top 10 benchmarks.
+> **External Attack Surface Management** — Discover, audit, and monitor your entire digital footprint with a full security pipeline and real-time web dashboard.
 
 ---
 
 ## ⚠️ Legal Notice
 
-SentinelFlow is designed for **authorised security testing only**. Only scan domains and systems you own or have explicit written permission to test. Unauthorised scanning is illegal in most jurisdictions.
+**SentinelFlow is for authorized security testing ONLY.**
+Only scan systems you own or have explicit written permission to test.
+Unauthorized scanning is illegal under the CFAA and equivalent laws worldwide.
 
 ---
 
-## Architecture
+## 📸 Dashboard
 
-```
-Seed Domain
-    │
-    ▼
-┌─────────────────────────────────────────────────┐
-│           Core Orchestrator (Python)             │
-│                    + SQLite DB                   │
-└───────┬──────────────┬──────────────┬────────────┘
-        │              │              │
-        ▼              ▼              ▼
-  ┌──────────┐  ┌──────────────┐  ┌──────────┐
-  │ Phase I  │  │   Phase II   │  │ Phase III│
-  │Discovery │  │Config & SAST │  │   DAST   │
-  │Subfinder │  │FFuf/JS/S3    │  │Nuclei/   │
-  │httpx     │  │              │  │SQLmap/XSS│
-  │naabu     │  │              │  │          │
-  └──────────┘  └──────────────┘  └──────────┘
-        │              │              │
-        └──────────────┼──────────────┘
-                       ▼
-            ┌─────────────────────┐
-            │  Vuln Assessment    │
-            │  (dedup + scoring)  │
-            └────────┬────────────┘
-                     │
-            ┌────────┴────────┐
-            ▼                 ▼
-    ┌──────────────┐  ┌──────────────┐
-    │  Phase IV    │  │  Reporting   │
-    │ Telegram Bot │  │  JSON + PDF  │
-    └──────────────┘  └──────────────┘
-```
-
----
-
-## Quick Start
-
-### Prerequisites
-
-- Docker & Docker Compose
-- A Telegram bot token (from [@BotFather](https://t.me/BotFather))
-- Your Telegram chat ID (from [@userinfobot](https://t.me/userinfobot))
-
-### 1. Configure environment
+Open `dashboard/index.html` in a browser for a preview in **demo mode** (no backend required).
+For live data, start the Flask API:
 
 ```bash
-cp .env.example .env
-# Edit .env and fill in your Telegram tokens
-nano .env
-```
-
-### 2. Build and start
-
-```bash
-# Build the image (downloads Go tools + nuclei templates — takes ~5 min first time)
-docker-compose build
-
-# Start lab targets (Juice Shop + DVWA) in the background
-docker-compose up -d juice-shop dvwa
-
-# Start the Telegram bot listener
-docker-compose up -d telegram-bot
-```
-
-### 3. Run a scan
-
-```bash
-# Scan a domain
-docker-compose run --rm scanner example.com
-
-# Scan without Telegram notifications
-docker-compose run --rm scanner example.com --no-notify
-
-# Scan the local lab (Juice Shop)
-docker-compose run --rm scanner juice-shop --no-notify
-```
-
-### 4. View results
-
-```bash
-# List all scans
-python sf_cli.py scans
-
-# View findings for scan #1
-python sf_cli.py findings 1
-
-# View assets for scan #1
-python sf_cli.py assets 1
-
-# Summary stats
-python sf_cli.py summary 1
-
-# Re-generate report
-python sf_cli.py report 1
-```
-
-Reports are saved to `./reports/` as both `.json` and `.pdf`.
-
----
-
-## Telegram Bot Commands
-
-Once `telegram-bot` is running, message your bot:
-
-| Command | Description |
-|---------|-------------|
-| `/scan example.com` | Trigger a full EASM scan |
-| `/status` | Show last 5 scans |
-| `/help` | Show available commands |
-
-Critical and High findings are pushed as real-time alerts.
-
----
-
-## Local Lab (Phase V)
-
-The docker-compose file includes two pre-configured vulnerable targets for safe testing:
-
-| Target | URL | Description |
-|--------|-----|-------------|
-| OWASP Juice Shop | http://localhost:3000 | Modern vulnerable web app |
-| DVWA | http://localhost:8080 | Classic PHP/MySQL vuln app |
-
-```bash
-# Benchmark against both lab targets
-python lab/run_lab.py
-
-# Scan only Juice Shop
-python lab/run_lab.py --target juice-shop
+python dashboard/app.py
+# → http://localhost:5000
 ```
 
 ---
 
-## Project Structure
+## 🚀 Quick Start
 
-```
-sentinelflow/
-├── core/
-│   ├── orchestrator.py          # Central pipeline coordinator
-│   └── database.py              # SQLite schema + helpers
-├── phases/
-│   ├── discovery/
-│   │   ├── subdomain_enum.py    # Subfinder + DNS resolution
-│   │   └── service_probe.py     # httpx + naabu port scan
-│   ├── audit/
-│   │   ├── endpoint_fuzz.py     # FFuf sensitive path discovery
-│   │   ├── js_sast.py           # JavaScript secret scanning
-│   │   └── cloud_exposure.py    # S3 bucket exposure check
-│   ├── dast/
-│   │   ├── input_validation.py  # SQLi + XSS parameter probing
-│   │   └── nuclei_scan.py       # Nuclei CVE/template scanning
-│   ├── alerting/
-│   │   └── telegram_bot.py      # Async Telegram alert + bot
-│   └── reporting/
-│       └── report_generator.py  # JSON + PDF compliance reports
-├── config/
-│   └── settings.py              # Centralised configuration
-├── lab/
-│   └── run_lab.py               # Lab benchmark runner
-├── sf_cli.py                    # CLI results viewer
-├── Dockerfile
-├── docker-compose.yml
-├── requirements.txt
-└── .env.example
-```
-
----
-
-## Configuration Reference
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TELEGRAM_BOT_TOKEN` | *required* | Bot token from @BotFather |
-| `TELEGRAM_CHAT_ID` | *required* | Target chat/group ID |
-| `SHODAN_API_KEY` | optional | Improves subfinder coverage |
-| `SECURITYTRAILS_API_KEY` | optional | Improves subfinder coverage |
-| `SCAN_TIMEOUT_SEC` | 3600 | Max seconds per scan |
-| `MAX_CONCURRENT_TASKS` | 5 | Parallel task limit |
-| `ALERT_ON_SEVERITIES` | `critical,high` | Severities that trigger Telegram |
-| `NUCLEI_SEVERITY_FILTER` | `critical,high,medium` | Nuclei severity filter |
-| `S3_CHECK_ENABLED` | `true` | Enable S3 bucket exposure checks |
-
----
-
-## Tool Installation (without Docker)
-
-If running locally without Docker:
+### 1. Install Python Dependencies
 
 ```bash
-# Python dependencies
 pip install -r requirements.txt
+```
 
-# Go tools (requires Go 1.21+)
+### 2. Install Go Security Tools (optional but recommended)
+
+```bash
+# ProjectDiscovery suite
 go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
 go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
 go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
 go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-go install -v github.com/ffuf/ffuf/v2@latest
+go install github.com/ffuf/ffuf/v2@latest
 
-# SQLmap
-pip install sqlmap
-
-# Nuclei templates
+# Update Nuclei templates
 nuclei -update-templates
+```
 
-# Run
-cp .env.example .env && nano .env
-python -m core.orchestrator example.com
+> **Note:** All Go tools are optional. SentinelFlow has native Python fallbacks for every tool.
+
+### 3. Configure API Keys (for better passive recon)
+
+```bash
+cp .env.example .env
+# Edit .env with your API keys
+```
+
+### 4. Run a Scan
+
+```bash
+# Full pipeline (with authorization confirmation)
+python main.py --domain example.com --authorized
+
+# Discovery only (passive recon)
+python main.py --domain example.com --phases discovery --authorized
+
+# With Telegram alerts
+python main.py --domain example.com \
+  --telegram-token YOUR_TOKEN \
+  --telegram-chat YOUR_CHAT_ID \
+  --authorized
+```
+
+### 5. Launch Dashboard
+
+```bash
+python dashboard/app.py
+# Open http://localhost:5000
 ```
 
 ---
 
-## Findings Severity Scale
+## 🐳 Docker
 
-| Severity | Score | Examples |
-|----------|-------|---------|
-| Critical | 10 | RCE, public S3 bucket, `.env` exposed, confirmed SQLi |
-| High | 7 | XSS, hardcoded API keys, auth bypass, `.git` exposed |
-| Medium | 4 | Swagger UI exposed, S3 exists (403), SSRF indicators |
-| Low | 1 | Information disclosure, missing security headers |
-| Info | 0 | Banner grabs, tech fingerprinting |
+```bash
+# Build and run full stack (includes DVWA + Juice Shop test labs)
+cd docker
+docker-compose up -d
+
+# Run a scan against the test lab
+docker exec sentinelflow python main.py \
+  --domain juiceshop \
+  --authorized \
+  --phases discovery,audit,dast,report
+```
+
+---
+
+## 🏗️ Architecture
+
+```
+sentinelflow/
+├── main.py                    # CLI entry point
+├── dashboard/
+│   ├── app.py                 # Flask REST API server
+│   └── index.html             # Single-page web dashboard
+├── core/
+│   ├── config.py              # Configuration management
+│   ├── database.py            # SQLite async data layer
+│   ├── logger.py              # Structured colored logging
+│   └── orchestrator.py        # Central pipeline coordinator
+├── phases/
+│   ├── discovery.py           # Phase I: Asset discovery
+│   ├── auditor.py             # Phase II: Config & secret audit
+│   ├── dast.py                # Phase III: Dynamic security testing
+│   └── notifier.py            # Phase IV: Telegram alerts
+├── reports/
+│   └── generator.py           # JSON / HTML / PDF report generation
+├── utils/
+│   ├── http_client.py         # Shared aiohttp session factory
+│   ├── rate_limiter.py        # Token bucket rate limiter
+│   └── banner.py              # CLI banner
+├── config/
+│   ├── sentinelflow.yaml      # Main configuration file
+│   └── wordlists/common.txt   # Fuzzing wordlist
+├── docker/
+│   ├── Dockerfile             # Multi-stage build (Go tools + Python)
+│   └── docker-compose.yml     # Full stack with test labs
+└── tests/
+    └── test_sentinelflow.py   # Full test suite (pytest)
+```
+
+---
+
+## 🔬 Pipeline Phases
+
+### Phase I: Digital Asset Inventory (Discovery)
+- **Passive Recon:** crt.sh, HackerTarget, AnubisDB, AlienVault OTX, URLScan.io
+- **API Recon:** SecurityTrails, VirusTotal, Chaos (with API keys)
+- **Tool Integration:** `subfinder` for comprehensive passive enum
+- **Active DNS:** Concurrent A-record resolution (8.8.8.8, 1.1.1.1)
+- **Service Probing:** `httpx` (or native aiohttp fallback) — title, server, tech stack, TLS, CDN, WAF
+- **Port Scanning:** `naabu` (or native async TCP scanner)
+
+### Phase II: Configuration & Secret Leakage Audit
+- **Path Fuzzing:** 60+ sensitive paths (.env, .git, wp-config, backups, SSH keys…)
+- **FFuf Integration:** Thorough directory enumeration via wordlist
+- **JS SAST:** 15+ regex patterns for AWS keys, Stripe secrets, JWTs, private keys, passwords…
+- **Cloud Exposure:** S3, GCS, Azure Blob public access checks
+
+### Phase III: Dynamic Application Security Testing (DAST)
+- **Security Headers:** HSTS, CSP, X-Frame-Options, CORS, Server disclosure
+- **Endpoint Discovery:** Wayback Machine CDX API + page crawling + form extraction
+- **SQLi Detection:** Error-based, non-destructive (MySQL, PostgreSQL, MSSQL, Oracle, SQLite)
+- **XSS Detection:** Reflected XSS with 9 payload variants
+- **Open Redirect:** Redirect parameter fuzzing
+- **Nuclei:** CVE + misconfiguration template scanning
+
+### Phase IV: Notifications
+- Real-time Telegram alerts for Critical/High findings
+- Scan start/complete summaries
+- Interactive bot mode (`/scan`, `/status`, `/findings`)
+
+### Phase V: Reports
+- JSON (machine-readable, full detail)
+- HTML (self-contained, shareable)
+- PDF (via reportlab or weasyprint)
+- OWASP Top 10 mapping
+- PCI-DSS, ISO 27001, GDPR compliance assessment
+- Risk score (0-100) and remediation timelines
+
+---
+
+## ⚙️ Configuration
+
+Edit `config/sentinelflow.yaml`:
+
+```yaml
+scan:
+  threads: 10
+  rate_limit: 100
+  ports: "80,443,8080,8443,..."
+  severity: [critical, high, medium, low, info]
+  alert_on: [critical, high]
+
+notifications:
+  telegram:
+    token: "YOUR_BOT_TOKEN"
+    chat_id: "YOUR_CHAT_ID"
+```
+
+Or use environment variables:
+```bash
+export TELEGRAM_TOKEN=...
+export SHODAN_API_KEY=...
+export VIRUSTOTAL_API_KEY=...
+```
+
+---
+
+## 🤖 Telegram Bot Mode
+
+```bash
+python main.py --bot-mode \
+  --telegram-token YOUR_TOKEN \
+  --telegram-chat YOUR_CHAT_ID
+```
+
+Bot commands:
+- `/scan example.com` — trigger a scan
+- `/status` — recent scan history
+- `/findings 3` — findings for scan #3
+- `/help` — command reference
+
+---
+
+## 🧪 Testing
+
+```bash
+# Run full test suite
+pytest tests/ -v --asyncio-mode=auto
+
+# With coverage
+pytest tests/ -v --asyncio-mode=auto --cov=. --cov-report=html
+```
+
+---
+
+## 📊 Dashboard API
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/stats` | Overall statistics |
+| `GET /api/scans` | Scan history |
+| `GET /api/scans/<id>` | Scan detail + findings |
+| `GET /api/findings` | All findings (filterable) |
+| `GET /api/assets/subdomains?domain=` | Subdomain inventory |
+| `GET /api/assets/services?domain=` | Live services |
+| `POST /api/scan/start` | Trigger new scan |
+| `GET /api/domains` | All monitored domains |
+
+---
+
+## 🔧 CLI Reference
+
+```
+python main.py [OPTIONS]
+
+Target:
+  --domain DOMAIN           Root domain to scan
+  --scope-file FILE         File with multiple domains
+  --authorized              Confirm scan authorization (required)
+
+Phases:
+  --phases PHASES           Comma-separated: discovery,audit,dast,report
+  --skip-phases PHASES      Phases to exclude
+  --passive-only            No active probing
+
+Output:
+  --output DIR              Results directory (default: ./results)
+  --format json|pdf|both    Report format
+  --verbose                 Verbose logging
+
+Notifications:
+  --telegram-token TOKEN    Telegram bot token
+  --telegram-chat CHAT_ID   Telegram chat ID
+
+Bot Mode:
+  --bot-mode               Start interactive Telegram bot
+
+Config:
+  --config FILE             YAML config file
+  --db FILE                 SQLite database path
+  --threads N               Concurrent threads (default: 10)
+  --timeout N               Request timeout seconds (default: 30)
+  --rate-limit N            Requests/second (default: 100)
+```
+
+---
+
+## 📄 License
+
+MIT License — See LICENSE file.
+
+**Remember:** Always obtain explicit written authorization before scanning any system.

@@ -1,0 +1,102 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SentinelFlow Docker Compose
+# Includes: SentinelFlow + authorized test lab targets (DVWA, Juice Shop)
+#
+# LEGAL NOTICE: The test lab services (dvwa, juiceshop) are intentionally
+# vulnerable applications for AUTHORIZED security testing ONLY.
+# Never expose them to the internet.
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: "3.9"
+
+services:
+
+  # ─── SentinelFlow Engine ──────────────────────────────────────────────────
+  sentinelflow:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: sentinelflow
+    restart: unless-stopped
+    volumes:
+      - ../results:/app/results
+      - ../logs:/app/logs
+      - sentinelflow_data:/app/data
+      - ../config:/app/config:ro
+    environment:
+      - SHODAN_API_KEY=${SHODAN_API_KEY:-}
+      - CENSYS_API_ID=${CENSYS_API_ID:-}
+      - CENSYS_API_SECRET=${CENSYS_API_SECRET:-}
+      - VIRUSTOTAL_API_KEY=${VIRUSTOTAL_API_KEY:-}
+      - SECURITYTRAILS_API_KEY=${SECURITYTRAILS_API_KEY:-}
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - SF_DB_PATH=/app/data/sentinelflow.db
+    networks:
+      - sentinelflow_net
+    cap_add:
+      - NET_RAW       # Required for naabu/nmap
+    depends_on:
+      - dvwa
+      - juiceshop
+    command: >
+      --domain localhost
+      --authorized
+      --phases discovery,audit,dast,report
+      --output /app/results
+
+  # ─── OWASP Juice Shop (intentionally vulnerable) ──────────────────────────
+  juiceshop:
+    image: bkimminich/juice-shop:latest
+    container_name: sentinelflow_juiceshop
+    restart: unless-stopped
+    ports:
+      - "3000:3000"    # Only bind to localhost in production
+    networks:
+      - sentinelflow_net
+    environment:
+      - NODE_ENV=production
+    labels:
+      - "sentinelflow.authorized=true"
+      - "sentinelflow.description=OWASP Juice Shop - intentionally vulnerable"
+
+  # ─── DVWA (Damn Vulnerable Web Application) ───────────────────────────────
+  dvwa:
+    image: vulnerables/web-dvwa:latest
+    container_name: sentinelflow_dvwa
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    networks:
+      - sentinelflow_net
+    labels:
+      - "sentinelflow.authorized=true"
+      - "sentinelflow.description=DVWA - intentionally vulnerable"
+
+  # ─── Dashboard (optional web UI) ─────────────────────────────────────────
+  dashboard:
+    image: python:3.11-slim
+    container_name: sentinelflow_dashboard
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - ../dashboard:/app/dashboard:ro
+      - sentinelflow_data:/app/data:ro
+    environment:
+      - SF_DB_PATH=/app/data/sentinelflow.db
+    command: >
+      python -m http.server 5000 --directory /app/dashboard
+    networks:
+      - sentinelflow_net
+
+networks:
+  sentinelflow_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  sentinelflow_data:
+    driver: local

@@ -1,0 +1,78 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SentinelFlow Configuration File
+# ─────────────────────────────────────────────────────────────────────────────
+# IMPORTANT: Never commit API keys to version control.
+# Use environment variables instead (see .env.example).
+
+# ─── Tool Paths ───────────────────────────────────────────────────────────────
+# If tools are in PATH, you can omit these. Otherwise specify full paths.
+tools:
+  subfinder: subfinder          # go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+  httpx: httpx                  # go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+  naabu: naabu                  # go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
+  nuclei: nuclei                # go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+  ffuf: ffuf                    # go install github.com/ffuf/ffuf/v2@latest
+  sqlmap: sqlmap                # pip install sqlmap OR apt install sqlmap
+
+# ─── API Keys ─────────────────────────────────────────────────────────────────
+# Preferred: set via environment variables (SHODAN_API_KEY, etc.)
+# These expand passive recon coverage significantly.
+api_keys:
+  shodan_api_key: ""            # https://shodan.io
+  censys_api_id: ""             # https://censys.io
+  censys_api_secret: ""
+  virustotal_api_key: ""        # https://virustotal.com
+  securitytrails_api_key: ""    # https://securitytrails.com
+  chaos_api_key: ""             # https://chaos.projectdiscovery.io
+
+# ─── Scan Settings ────────────────────────────────────────────────────────────
+scan:
+  threads: 10                   # Concurrent scanning threads
+  timeout: 30                   # Request timeout in seconds
+  rate_limit: 100               # Max requests per second
+
+  # Port list for naabu/native port scanning
+  ports: "21,22,23,25,53,80,110,143,443,445,993,995,3306,3389,5432,5900,6379,8080,8443,8888,9000,9200,27017"
+
+  # Wordlist for directory fuzzing (ffuf)
+  wordlist: config/wordlists/common.txt
+
+  # Which severity levels to include in scans
+  severity:
+    - critical
+    - high
+    - medium
+    - low
+    - info
+
+  # Which severities trigger instant Telegram alerts
+  alert_on:
+    - critical
+    - high
+
+# ─── Nuclei Settings ──────────────────────────────────────────────────────────
+nuclei:
+  # Leave empty to use default community templates (~5000 templates)
+  templates_path: ""
+  # Specific template categories to include
+  # tags: "cve,exposed-panels,misconfig,default-logins"
+
+# ─── Reporting ────────────────────────────────────────────────────────────────
+report:
+  format: both                  # json | pdf | both
+  include_info: false           # Include INFO-level findings in report
+
+# ─── Notifications ────────────────────────────────────────────────────────────
+notifications:
+  telegram:
+    token: ""                   # Or set TELEGRAM_TOKEN env var
+    chat_id: ""                 # Or set TELEGRAM_CHAT_ID env var
+
+# ─── Exclusions ───────────────────────────────────────────────────────────────
+exclusions:
+  # Subdomains to skip entirely
+  subdomains: []
+  # Ports to not scan
+  ports: []
+  # URL patterns to exclude from testing
+  url_patterns: []
