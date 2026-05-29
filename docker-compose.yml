@@ -1,0 +1,92 @@
+version: "3.9"
+
+# ── Shared network ────────────────────────────────────────────────────────────
+networks:
+  sentinelnet:
+    driver: bridge
+
+# ── Persistent volumes ────────────────────────────────────────────────────────
+volumes:
+  sf_data:
+  sf_reports:
+  sf_logs:
+
+services:
+
+  # ── Core scanner ─────────────────────────────────────────────────────────────
+  scanner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sentinelflow_scanner
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - sf_data:/app/data
+      - sf_reports:/app/reports
+      - sf_logs:/app/logs
+    networks:
+      - sentinelnet
+    # Override CMD to trigger a scan; or leave as --help for interactive use.
+    # Example: docker-compose run scanner example.com
+    command: ["--help"]
+    cap_add:
+      - NET_RAW      # Required by naabu for raw socket port scanning
+    depends_on:
+      - juice-shop
+      - dvwa
+
+  # ── Telegram bot (long-poll listener) ────────────────────────────────────────
+  telegram-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sentinelflow_bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - sf_data:/app/data
+      - sf_reports:/app/reports
+      - sf_logs:/app/logs
+    networks:
+      - sentinelnet
+    entrypoint: ["python", "-m", "phases.alerting.telegram_bot"]
+    command: []
+
+  # ── Phase V Lab: OWASP Juice Shop ────────────────────────────────────────────
+  juice-shop:
+    image: bkimminich/juice-shop:latest
+    container_name: sentinelflow_juiceshop
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    networks:
+      - sentinelnet
+
+  # ── Phase V Lab: DVWA ────────────────────────────────────────────────────────
+  dvwa:
+    image: ghcr.io/digininja/dvwa:latest
+    container_name: sentinelflow_dvwa
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    environment:
+      - DB_SERVER=dvwa-db
+    depends_on:
+      - dvwa-db
+    networks:
+      - sentinelnet
+
+  dvwa-db:
+    image: mariadb:10.11
+    container_name: sentinelflow_dvwadb
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: dvwa
+      MYSQL_DATABASE:      dvwa
+      MYSQL_USER:          dvwa
+      MYSQL_PASSWORD:      dvwa
+    volumes:
+      - sf_data:/var/lib/mysql
+    networks:
+      - sentinelnet
